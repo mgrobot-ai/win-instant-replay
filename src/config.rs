@@ -586,6 +586,46 @@ mod tests {
     }
 
     #[test]
+    fn rejects_enabled_system_audio_without_device_name() {
+        let mut config = FileConfig::default();
+        config.system_audio_enabled = true;
+        config.system_audio_device = String::new();
+        let error = config
+            .into_app_config(&fake_paths())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("system_audio_device"));
+    }
+
+    #[test]
+    fn preserves_audio_fields_when_round_tripping_runtime_config() {
+        let mut config = FileConfig::default();
+        config.system_audio_enabled = true;
+        config.system_audio_backend = "dshow".to_string();
+        config.system_audio_device = "Stereo Mix".to_string();
+        config.microphone_enabled = true;
+        config.microphone_backend = "wasapi".to_string();
+        config.microphone_device = "Microphone Array".to_string();
+        config.audio_sample_rate = 44_100;
+        config.audio_channels = 1;
+        config.audio_bitrate = "128k".to_string();
+        config.max_replay_seconds = 300;
+
+        let app = config.clone().into_app_config(&fake_paths()).unwrap();
+        let file = app.to_file_config(&fake_paths());
+
+        assert!(file.system_audio_enabled);
+        assert_eq!(file.system_audio_backend, "dshow");
+        assert_eq!(file.system_audio_device, "Stereo Mix");
+        assert!(file.microphone_enabled);
+        assert_eq!(file.microphone_backend, "wasapi");
+        assert_eq!(file.microphone_device, "Microphone Array");
+        assert_eq!(file.audio_sample_rate, 44_100);
+        assert_eq!(file.audio_channels, 1);
+        assert_eq!(file.audio_bitrate, "128k");
+    }
+
+    #[test]
     fn serializes_and_deserializes_default_file_config() {
         let config = FileConfig::default();
         let rendered = toml::to_string_pretty(&config).unwrap();

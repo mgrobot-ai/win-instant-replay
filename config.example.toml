@@ -16,6 +16,7 @@ preset = "veryfast"
 ffmpeg_input = "desktop"
 
 # Audio is opt-in. Screen-only capture remains the default.
+# Backends must be "wasapi" or "dshow". Device names are plain text ffmpeg device names.
 system_audio_enabled = false
 system_audio_backend = "wasapi"
 system_audio_device = "default"

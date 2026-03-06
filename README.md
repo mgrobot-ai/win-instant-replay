@@ -115,12 +115,12 @@ That command helps when you need an exact microphone name or a system-audio devi
 
 1. Install ffmpeg.
 2. Launch `win-instant-replay.exe`.
-3. Open **Settings** from the tray icon if you want to change the output directory, replay window, ffmpeg path, segment length, or the built-in hotkeys.
+3. Open **Settings** from the tray icon if you want to change the output directory, replay window, ffmpeg path, segment length, audio settings, or the built-in hotkeys.
 4. Wait about **15-20 seconds** so the rolling buffer can fill.
 5. Press a hotkey such as `Ctrl+Alt+Shift+1`.
 6. Check your output folder for a saved replay clip.
 
-By default the app captures **screen only**. If you want audio, enable it in `config.toml`.
+By default the app captures **screen only**. If you want audio, enable it in the Settings window or in `config.toml`.
 
 ## How it works
 
@@ -182,6 +182,9 @@ The tray **Settings** window manages the most common user-facing options:
 - ffmpeg path
 - replay buffer / retention window (`max_replay_seconds`)
 - segment length (`segment_seconds`)
+- system audio enable/backend/device
+- microphone enable/backend/device
+- audio sample rate, channel count, and bitrate
 - the built-in hotkeys for **10 / 30 / 60 / 120 / 300** second saves
 
 When you click **Save**, the app validates the config, writes `config.toml`, re-registers hotkeys, and restarts the background ffmpeg capture so the new settings take effect immediately.
@@ -190,7 +193,7 @@ A couple of practical notes:
 
 - leaving **ffmpeg path** blank means "use `ffmpeg.exe` from `PATH`"
 - leaving **output directory** blank means "use the default Videos-based folder"
-- audio options are still **config-file only**
+- audio device boxes are plain text; use exact ffmpeg device names when you are not using defaults like `wasapi + default`
 
 ### Main config fields
 
@@ -216,6 +219,8 @@ A couple of practical notes:
 - `hotkeys` - replay durations and key combos
 
 ### Audio configuration notes
+
+The Settings window now exposes the common audio fields directly. Device auto-discovery is still not built in, so the device boxes are plain text fields that expect ffmpeg-friendly device names when you are not using defaults like `wasapi + default`.
 
 #### 1) Screen + system audio
 
@@ -253,15 +258,18 @@ Enable both blocks together. The app mixes them into one audio track in the roll
 
 #### 4) Settings window vs config file
 
-The current tray settings window only edits a **small subset** of settings:
+The tray settings window now edits the most common runtime settings, including audio:
 
 - output directory
 - ffmpeg path
 - replay buffer seconds
 - segment length seconds
+- system audio enable/backend/device
+- microphone enable/backend/device
+- audio sample rate, channels, and bitrate
 - the built-in **10 / 30 / 60 / 120 / 300** hotkeys
 
-Audio options are currently **config-file only**. Edit `config.toml`, then save settings or restart the app.
+More advanced fields such as `buffer_dir`, `frame_rate`, `encoder`, `preset`, `ffmpeg_input`, and `ffmpeg_extra_args` are still config-file-only.
 
 ### Supported hotkey format
 
@@ -422,7 +430,7 @@ If GPUI gains solid Windows support later, the settings surface would be a reaso
   - That made GPUI / gpui-components an impractical choice for a Windows tray app that needs a dependable shipped settings surface today.
 - **Not fully runtime-tested on Windows from this Linux authoring environment.**
   - Rust tests were run locally.
-  - The new settings window code was written carefully but not clicked through on a real Windows desktop from here.
+  - The updated settings window code was written carefully but not clicked through on a real Windows desktop from here.
   - Real Windows validation of tray behavior, settings save/reload flow, global hotkeys, and multiple audio-device combinations is still needed.
 - **System audio capture is practical, not magic.**
   - The default recommendation is `wasapi` with `system_audio_device = "default"`.
@@ -455,7 +463,7 @@ After downloading or building on Windows:
 5. press `Ctrl+Alt+Shift+1`
 6. confirm a replay clip appears in the output folder
 7. open the tray **Settings** window
-8. change the output folder or one hotkey, click **Save**, and confirm the app keeps running with the new config
+8. change the output folder, one hotkey, or one audio field, click **Save**, and confirm the app keeps running with the new config
 9. enable one audio mode and repeat:
    - system audio only
    - microphone only

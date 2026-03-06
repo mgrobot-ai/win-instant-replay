@@ -24,14 +24,15 @@ use windows::Win32::UI::Shell::{
     NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, GetMessageW, GetWindowTextLengthW, GetWindowTextW, IDC_ARROW,
-    IDI_APPLICATION, IsWindow, LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
-    MENU_ITEM_FLAGS, MSG, MessageBoxW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW,
-    SetForegroundWindow, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TRACK_POPUP_MENU_FLAGS,
-    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WNDCLASSW,
-    WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    AppendMenuW, BM_GETCHECK, BM_SETCHECK, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetWindowTextLengthW,
+    GetWindowTextW, IDC_ARROW, IDI_APPLICATION, IsWindow, LoadCursorW, LoadIconW, MB_ICONERROR,
+    MB_ICONINFORMATION, MB_OK, MENU_ITEM_FLAGS, MSG, MessageBoxW, PostQuitMessage, RegisterClassW,
+    SW_HIDE, SW_SHOW, SendMessageW, SetForegroundWindow, ShowWindow, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TRACK_POPUP_MENU_FLAGS, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_HOTKEY,
+    WM_LBUTTONDBLCLK, WM_RBUTTONUP, WNDCLASSW, WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW,
+    WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
@@ -70,6 +71,15 @@ struct SettingsWindowState {
     ffmpeg_path: isize,
     max_replay_seconds: isize,
     segment_seconds: isize,
+    system_audio_enabled: isize,
+    system_audio_backend: isize,
+    system_audio_device: isize,
+    microphone_enabled: isize,
+    microphone_backend: isize,
+    microphone_device: isize,
+    audio_sample_rate: isize,
+    audio_channels: isize,
+    audio_bitrate: isize,
     hotkeys: [HotkeyFieldHandle; 5],
     save_button: isize,
     cancel_button: isize,
@@ -485,8 +495,8 @@ unsafe fn open_settings_window() -> Result<()> {
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         120,
         120,
-        620,
-        470,
+        780,
+        640,
         None,
         None,
         Some(hinstance.into()),
@@ -509,11 +519,19 @@ unsafe fn create_settings_controls(hwnd: HWND) -> Result<SettingsWindowState> {
         "Leave ffmpeg blank to use ffmpeg.exe on PATH. Leave output blank to use the default Videos folder.",
         20,
         16,
-        560,
+        730,
+        20,
+    )?;
+    create_label(
+        hwnd,
+        "Audio devices are plain text fields. Use ffmpeg device names if you are not using the defaults.",
+        20,
+        38,
+        730,
         20,
     )?;
 
-    create_label(hwnd, "Output directory", 20, 52, 130, 20)?;
+    create_label(hwnd, "Output directory", 20, 72, 130, 20)?;
     let output_dir = create_edit(
         hwnd,
         file_config
@@ -523,12 +541,12 @@ unsafe fn create_settings_controls(hwnd: HWND) -> Result<SettingsWindowState> {
             .as_deref()
             .unwrap_or(""),
         180,
-        48,
-        390,
+        68,
+        230,
         24,
     )?;
 
-    create_label(hwnd, "ffmpeg path", 20, 90, 130, 20)?;
+    create_label(hwnd, "ffmpeg path", 20, 110, 130, 20)?;
     let ffmpeg_path = create_edit(
         hwnd,
         file_config
@@ -538,43 +556,108 @@ unsafe fn create_settings_controls(hwnd: HWND) -> Result<SettingsWindowState> {
             .as_deref()
             .unwrap_or(""),
         180,
-        86,
-        390,
+        106,
+        230,
         24,
     )?;
 
-    create_label(hwnd, "Replay buffer seconds", 20, 128, 150, 20)?;
+    create_label(hwnd, "Replay buffer seconds", 20, 148, 150, 20)?;
     let max_replay_seconds = create_edit(
         hwnd,
         &file_config.max_replay_seconds.to_string(),
         180,
-        124,
+        144,
         120,
         24,
     )?;
 
-    create_label(hwnd, "Segment length seconds", 20, 166, 150, 20)?;
+    create_label(hwnd, "Segment length seconds", 20, 186, 150, 20)?;
     let segment_seconds = create_edit(
         hwnd,
         &file_config.segment_seconds.to_string(),
         180,
-        162,
+        182,
         120,
         24,
     )?;
 
-    create_label(hwnd, "Global hotkeys", 20, 210, 150, 20)?;
+    let system_audio_enabled = create_checkbox(
+        hwnd,
+        "Enable system audio",
+        file_config.system_audio_enabled,
+        20,
+        228,
+        200,
+        24,
+    )?;
+
+    create_label(hwnd, "System backend", 20, 266, 130, 20)?;
+    let system_audio_backend =
+        create_edit(hwnd, &file_config.system_audio_backend, 180, 262, 120, 24)?;
+
+    create_label(hwnd, "System device", 20, 304, 130, 20)?;
+    let system_audio_device =
+        create_edit(hwnd, &file_config.system_audio_device, 180, 300, 230, 24)?;
+
+    let microphone_enabled = create_checkbox(
+        hwnd,
+        "Enable microphone",
+        file_config.microphone_enabled,
+        20,
+        342,
+        200,
+        24,
+    )?;
+
+    create_label(hwnd, "Mic backend", 20, 380, 130, 20)?;
+    let microphone_backend = create_edit(hwnd, &file_config.microphone_backend, 180, 376, 120, 24)?;
+
+    create_label(hwnd, "Mic device", 20, 418, 130, 20)?;
+    let microphone_device = create_edit(hwnd, &file_config.microphone_device, 180, 414, 230, 24)?;
+
+    create_label(hwnd, "Audio sample rate", 20, 456, 130, 20)?;
+    let audio_sample_rate = create_edit(
+        hwnd,
+        &file_config.audio_sample_rate.to_string(),
+        180,
+        452,
+        120,
+        24,
+    )?;
+
+    create_label(hwnd, "Audio channels", 20, 494, 130, 20)?;
+    let audio_channels = create_edit(
+        hwnd,
+        &file_config.audio_channels.to_string(),
+        180,
+        490,
+        120,
+        24,
+    )?;
+
+    create_label(hwnd, "Audio bitrate", 20, 532, 130, 20)?;
+    let audio_bitrate = create_edit(hwnd, &file_config.audio_bitrate, 180, 528, 120, 24)?;
+
+    create_label(hwnd, "Global hotkeys", 440, 72, 150, 20)?;
+    create_label(
+        hwnd,
+        "Backends: use 'wasapi' or 'dshow'.\r\nSystem audio usually works with wasapi + default.\r\nDirectShow devices need exact ffmpeg device names.",
+        440,
+        266,
+        300,
+        54,
+    )?;
 
     let hotkeys = [
-        create_hotkey_field(hwnd, &file_config, 10, 242)?,
-        create_hotkey_field(hwnd, &file_config, 30, 276)?,
-        create_hotkey_field(hwnd, &file_config, 60, 310)?,
-        create_hotkey_field(hwnd, &file_config, 120, 344)?,
-        create_hotkey_field(hwnd, &file_config, 300, 378)?,
+        create_hotkey_field(hwnd, &file_config, 10, 104, 440, 560, 170)?,
+        create_hotkey_field(hwnd, &file_config, 30, 138, 440, 560, 170)?,
+        create_hotkey_field(hwnd, &file_config, 60, 172, 440, 560, 170)?,
+        create_hotkey_field(hwnd, &file_config, 120, 206, 440, 560, 170)?,
+        create_hotkey_field(hwnd, &file_config, 300, 240, 440, 560, 170)?,
     ];
 
-    let save_button = create_button(hwnd, "Save", 390, 408, 80, 28)?;
-    let cancel_button = create_button(hwnd, "Cancel", 490, 408, 80, 28)?;
+    let save_button = create_button(hwnd, "Save", 580, 560, 80, 28)?;
+    let cancel_button = create_button(hwnd, "Cancel", 670, 560, 80, 28)?;
 
     Ok(SettingsWindowState {
         window: hwnd.0 as isize,
@@ -582,6 +665,15 @@ unsafe fn create_settings_controls(hwnd: HWND) -> Result<SettingsWindowState> {
         ffmpeg_path: ffmpeg_path.0 as isize,
         max_replay_seconds: max_replay_seconds.0 as isize,
         segment_seconds: segment_seconds.0 as isize,
+        system_audio_enabled: system_audio_enabled.0 as isize,
+        system_audio_backend: system_audio_backend.0 as isize,
+        system_audio_device: system_audio_device.0 as isize,
+        microphone_enabled: microphone_enabled.0 as isize,
+        microphone_backend: microphone_backend.0 as isize,
+        microphone_device: microphone_device.0 as isize,
+        audio_sample_rate: audio_sample_rate.0 as isize,
+        audio_channels: audio_channels.0 as isize,
+        audio_bitrate: audio_bitrate.0 as isize,
         hotkeys,
         save_button: save_button.0 as isize,
         cancel_button: cancel_button.0 as isize,
@@ -593,13 +685,16 @@ unsafe fn create_hotkey_field(
     file_config: &FileConfig,
     duration_seconds: u32,
     y: i32,
+    label_x: i32,
+    edit_x: i32,
+    edit_width: i32,
 ) -> Result<HotkeyFieldHandle> {
     create_label(
         hwnd,
         &format!("Save last {duration_seconds}s"),
-        40,
+        label_x,
         y + 4,
-        130,
+        110,
         20,
     )?;
 
@@ -611,7 +706,7 @@ unsafe fn create_hotkey_field(
         .or_else(|| default_hotkey_combination(duration_seconds))
         .unwrap_or("");
 
-    let handle = create_edit(hwnd, combination, 180, y, 210, 24)?;
+    let handle = create_edit(hwnd, combination, edit_x, y, edit_width, 24)?;
     Ok(HotkeyFieldHandle {
         duration_seconds,
         handle: handle.0 as isize,
@@ -678,6 +773,29 @@ unsafe fn create_button(
     )
 }
 
+unsafe fn create_checkbox(
+    parent: HWND,
+    text: &str,
+    checked: bool,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<HWND> {
+    let hwnd = create_child_window(
+        parent,
+        "BUTTON",
+        text,
+        WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | 0x00000003),
+        x,
+        y,
+        width,
+        height,
+    )?;
+    set_checkbox_checked(hwnd, checked);
+    Ok(hwnd)
+}
+
 unsafe fn create_child_window(
     parent: HWND,
     class_name: &str,
@@ -729,12 +847,36 @@ unsafe fn save_settings_from_window(_settings_hwnd: HWND) -> Result<()> {
         "Segment length seconds",
         &read_control_text(hwnd_from_isize(window.segment_seconds))?,
     )?;
+    let system_audio_enabled = read_checkbox_checked(hwnd_from_isize(window.system_audio_enabled));
+    let microphone_enabled = read_checkbox_checked(hwnd_from_isize(window.microphone_enabled));
+    let system_audio_backend = read_control_text(hwnd_from_isize(window.system_audio_backend))?;
+    let system_audio_device = read_control_text(hwnd_from_isize(window.system_audio_device))?;
+    let microphone_backend = read_control_text(hwnd_from_isize(window.microphone_backend))?;
+    let microphone_device = read_control_text(hwnd_from_isize(window.microphone_device))?;
+    let audio_sample_rate = parse_u32_field(
+        "Audio sample rate",
+        &read_control_text(hwnd_from_isize(window.audio_sample_rate))?,
+    )?;
+    let audio_channels = parse_u32_field(
+        "Audio channels",
+        &read_control_text(hwnd_from_isize(window.audio_channels))?,
+    )?;
+    let audio_bitrate = read_control_text(hwnd_from_isize(window.audio_bitrate))?;
 
     let mut file_config = load_or_create_file_config(&state.paths)?;
     file_config.output_dir = empty_to_none_path(&output_dir);
     file_config.ffmpeg_path = empty_to_none_path(&ffmpeg_path);
     file_config.max_replay_seconds = max_replay_seconds;
     file_config.segment_seconds = segment_seconds;
+    file_config.system_audio_enabled = system_audio_enabled;
+    file_config.system_audio_backend = system_audio_backend;
+    file_config.system_audio_device = system_audio_device;
+    file_config.microphone_enabled = microphone_enabled;
+    file_config.microphone_backend = microphone_backend;
+    file_config.microphone_device = microphone_device;
+    file_config.audio_sample_rate = audio_sample_rate;
+    file_config.audio_channels = audio_channels;
+    file_config.audio_bitrate = audio_bitrate;
     file_config.hotkeys = window
         .hotkeys
         .iter()
@@ -831,6 +973,15 @@ unsafe fn read_control_text(hwnd: HWND) -> Result<String> {
     Ok(String::from_utf16_lossy(&buffer[..copied])
         .trim()
         .to_string())
+}
+
+unsafe fn set_checkbox_checked(hwnd: HWND, checked: bool) {
+    let state = if checked { 1usize } else { 0usize };
+    let _ = SendMessageW(hwnd, BM_SETCHECK, Some(WPARAM(state)), Some(LPARAM(0)));
+}
+
+unsafe fn read_checkbox_checked(hwnd: HWND) -> bool {
+    SendMessageW(hwnd, BM_GETCHECK, Some(WPARAM(0)), Some(LPARAM(0))).0 == 1
 }
 
 unsafe fn show_modal_message_box(hwnd: HWND, title: &str, body: &str, is_error: bool) {
