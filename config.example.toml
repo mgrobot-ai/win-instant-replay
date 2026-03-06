@@ -1,0 +1,36 @@
+# Example configuration for Win Instant Replay.
+#
+# If ffmpeg.exe is already on PATH, you can leave ffmpeg_path unset.
+# The app will auto-create a similar config on first launch.
+
+# ffmpeg_path = "C:/Tools/ffmpeg/bin/ffmpeg.exe"
+# buffer_dir = "C:/Users/you/AppData/Local/WinInstantReplay/buffer"
+# output_dir = "C:/Users/you/Videos/WinInstantReplay"
+
+max_replay_seconds = 300
+segment_seconds = 1
+frame_rate = 30
+encoder = "libx264"
+preset = "veryfast"
+ffmpeg_input = "desktop"
+ffmpeg_extra_args = []
+
+[[hotkeys]]
+duration_seconds = 10
+combination = "Ctrl+Alt+Shift+1"
+
+[[hotkeys]]
+duration_seconds = 30
+combination = "Ctrl+Alt+Shift+2"
+
+[[hotkeys]]
+duration_seconds = 60
+combination = "Ctrl+Alt+Shift+3"
+
+[[hotkeys]]
+duration_seconds = 120
+combination = "Ctrl+Alt+Shift+4"
+
+[[hotkeys]]
+duration_seconds = 300
+combination = "Ctrl+Alt+Shift+5"
