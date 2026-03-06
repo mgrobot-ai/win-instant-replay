@@ -10,6 +10,18 @@ use crate::retention::keep_segment_count;
 const DEFAULT_FRAME_RATE: u32 = 30;
 const DEFAULT_SEGMENT_SECONDS: u32 = 1;
 const DEFAULT_MAX_REPLAY_SECONDS: u32 = 300;
+const DEFAULT_AUDIO_SAMPLE_RATE: u32 = 48_000;
+const DEFAULT_AUDIO_CHANNELS: u32 = 2;
+const DEFAULT_AUDIO_BITRATE: &str = "192k";
+const DEFAULT_FFMPEG_PATH: &str = "ffmpeg.exe";
+pub const SETTINGS_HOTKEY_DURATIONS: [u32; 5] = [10, 30, 60, 120, 300];
+const DEFAULT_HOTKEYS: &[(u32, &str)] = &[
+    (10, "Ctrl+Alt+Shift+1"),
+    (30, "Ctrl+Alt+Shift+2"),
+    (60, "Ctrl+Alt+Shift+3"),
+    (120, "Ctrl+Alt+Shift+4"),
+    (300, "Ctrl+Alt+Shift+5"),
+];
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -30,6 +42,15 @@ pub struct AppConfig {
     pub encoder: String,
     pub preset: String,
     pub ffmpeg_input: String,
+    pub system_audio_enabled: bool,
+    pub system_audio_backend: AudioBackend,
+    pub system_audio_device: String,
+    pub microphone_enabled: bool,
+    pub microphone_backend: AudioBackend,
+    pub microphone_device: String,
+    pub audio_sample_rate: u32,
+    pub audio_channels: u32,
+    pub audio_bitrate: String,
     pub ffmpeg_extra_args: Vec<String>,
     pub hotkeys: Vec<HotkeyBinding>,
 }
@@ -37,6 +58,57 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn keep_segment_count(&self) -> usize {
         keep_segment_count(self.max_replay_seconds, self.segment_seconds)
+    }
+
+    pub fn hotkey_combination(&self, duration_seconds: u32) -> Option<&str> {
+        self.hotkeys
+            .iter()
+            .find(|binding| binding.duration_seconds == duration_seconds)
+            .map(|binding| binding.combo.as_str())
+    }
+
+    pub fn to_file_config(&self, paths: &AppPaths) -> FileConfig {
+        FileConfig {
+            ffmpeg_path: if self.ffmpeg_path == PathBuf::from(DEFAULT_FFMPEG_PATH) {
+                None
+            } else {
+                Some(self.ffmpeg_path.clone())
+            },
+            buffer_dir: if self.buffer_dir == paths.buffer_dir {
+                None
+            } else {
+                Some(self.buffer_dir.clone())
+            },
+            output_dir: if self.output_dir == paths.output_dir {
+                None
+            } else {
+                Some(self.output_dir.clone())
+            },
+            max_replay_seconds: self.max_replay_seconds,
+            segment_seconds: self.segment_seconds,
+            frame_rate: self.frame_rate,
+            encoder: self.encoder.clone(),
+            preset: self.preset.clone(),
+            ffmpeg_input: self.ffmpeg_input.clone(),
+            system_audio_enabled: self.system_audio_enabled,
+            system_audio_backend: self.system_audio_backend.as_str().to_string(),
+            system_audio_device: self.system_audio_device.clone(),
+            microphone_enabled: self.microphone_enabled,
+            microphone_backend: self.microphone_backend.as_str().to_string(),
+            microphone_device: self.microphone_device.clone(),
+            audio_sample_rate: self.audio_sample_rate,
+            audio_channels: self.audio_channels,
+            audio_bitrate: self.audio_bitrate.clone(),
+            ffmpeg_extra_args: self.ffmpeg_extra_args.clone(),
+            hotkeys: self
+                .hotkeys
+                .iter()
+                .map(|binding| HotkeyEntry {
+                    duration_seconds: binding.duration_seconds,
+                    combination: binding.combo.clone(),
+                })
+                .collect(),
+        }
     }
 }
 
@@ -83,7 +155,30 @@ pub enum KeyCode {
     Function(u8),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AudioBackend {
+    Wasapi,
+    Dshow,
+}
+
+impl AudioBackend {
+    pub fn parse(value: &str, field_name: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "wasapi" => Ok(Self::Wasapi),
+            "dshow" => Ok(Self::Dshow),
+            _ => bail!("{field_name} must be either 'wasapi' or 'dshow'"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Wasapi => "wasapi",
+            Self::Dshow => "dshow",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct FileConfig {
     pub ffmpeg_path: Option<PathBuf>,
@@ -95,11 +190,20 @@ pub struct FileConfig {
     pub encoder: String,
     pub preset: String,
     pub ffmpeg_input: String,
+    pub system_audio_enabled: bool,
+    pub system_audio_backend: String,
+    pub system_audio_device: String,
+    pub microphone_enabled: bool,
+    pub microphone_backend: String,
+    pub microphone_device: String,
+    pub audio_sample_rate: u32,
+    pub audio_channels: u32,
+    pub audio_bitrate: String,
     pub ffmpeg_extra_args: Vec<String>,
     pub hotkeys: Vec<HotkeyEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct HotkeyEntry {
     pub duration_seconds: u32,
     pub combination: String,
@@ -117,31 +221,36 @@ impl Default for FileConfig {
             encoder: "libx264".to_string(),
             preset: "veryfast".to_string(),
             ffmpeg_input: "desktop".to_string(),
+            system_audio_enabled: false,
+            system_audio_backend: "wasapi".to_string(),
+            system_audio_device: "default".to_string(),
+            microphone_enabled: false,
+            microphone_backend: "dshow".to_string(),
+            microphone_device: String::new(),
+            audio_sample_rate: DEFAULT_AUDIO_SAMPLE_RATE,
+            audio_channels: DEFAULT_AUDIO_CHANNELS,
+            audio_bitrate: DEFAULT_AUDIO_BITRATE.to_string(),
             ffmpeg_extra_args: Vec::new(),
-            hotkeys: vec![
-                HotkeyEntry {
-                    duration_seconds: 10,
-                    combination: "Ctrl+Alt+Shift+1".to_string(),
-                },
-                HotkeyEntry {
-                    duration_seconds: 30,
-                    combination: "Ctrl+Alt+Shift+2".to_string(),
-                },
-                HotkeyEntry {
-                    duration_seconds: 60,
-                    combination: "Ctrl+Alt+Shift+3".to_string(),
-                },
-                HotkeyEntry {
-                    duration_seconds: 120,
-                    combination: "Ctrl+Alt+Shift+4".to_string(),
-                },
-                HotkeyEntry {
-                    duration_seconds: 300,
-                    combination: "Ctrl+Alt+Shift+5".to_string(),
-                },
-            ],
+            hotkeys: default_hotkey_entries(),
         }
     }
+}
+
+pub fn default_hotkey_combination(duration_seconds: u32) -> Option<&'static str> {
+    DEFAULT_HOTKEYS
+        .iter()
+        .find(|(duration, _)| *duration == duration_seconds)
+        .map(|(_, combination)| *combination)
+}
+
+pub fn default_hotkey_entries() -> Vec<HotkeyEntry> {
+    DEFAULT_HOTKEYS
+        .iter()
+        .map(|(duration_seconds, combination)| HotkeyEntry {
+            duration_seconds: *duration_seconds,
+            combination: (*combination).to_string(),
+        })
+        .collect()
 }
 
 pub fn resolve_paths() -> Result<AppPaths> {
@@ -165,23 +274,23 @@ pub fn resolve_paths() -> Result<AppPaths> {
 }
 
 pub fn load_or_create() -> Result<AppConfig> {
+    let (_, config) = load_or_create_with_paths()?;
+    Ok(config)
+}
+
+pub fn load_or_create_with_paths() -> Result<(AppPaths, AppConfig)> {
     let paths = resolve_paths()?;
+    let file_config = load_or_create_file_config(&paths)?;
+    let config = file_config.into_app_config(&paths)?;
+    ensure_runtime_dirs(&config, &paths)?;
+    Ok((paths, config))
+}
+
+pub fn load_or_create_file_config(paths: &AppPaths) -> Result<FileConfig> {
     fs::create_dir_all(&paths.config_dir).with_context(|| {
         format!(
             "creating config directory at {}",
             paths.config_dir.display()
-        )
-    })?;
-    fs::create_dir_all(&paths.buffer_dir).with_context(|| {
-        format!(
-            "creating buffer directory at {}",
-            paths.buffer_dir.display()
-        )
-    })?;
-    fs::create_dir_all(&paths.output_dir).with_context(|| {
-        format!(
-            "creating output directory at {}",
-            paths.output_dir.display()
         )
     })?;
 
@@ -192,13 +301,48 @@ pub fn load_or_create() -> Result<AppConfig> {
             .with_context(|| format!("parsing {}", paths.config_file.display()))?
     } else {
         let default_config = FileConfig::default();
-        let rendered = toml::to_string_pretty(&default_config)?;
-        fs::write(&paths.config_file, rendered)
-            .with_context(|| format!("writing {}", paths.config_file.display()))?;
+        save_file_config(paths, &default_config)?;
         default_config
     };
 
-    file_config.into_app_config(&paths)
+    Ok(file_config)
+}
+
+pub fn save_file_config(paths: &AppPaths, config: &FileConfig) -> Result<()> {
+    fs::create_dir_all(&paths.config_dir).with_context(|| {
+        format!(
+            "creating config directory at {}",
+            paths.config_dir.display()
+        )
+    })?;
+
+    let rendered = toml::to_string_pretty(config)?;
+    fs::write(&paths.config_file, rendered)
+        .with_context(|| format!("writing {}", paths.config_file.display()))?;
+
+    Ok(())
+}
+
+pub fn ensure_runtime_dirs(config: &AppConfig, paths: &AppPaths) -> Result<()> {
+    fs::create_dir_all(&paths.config_dir).with_context(|| {
+        format!(
+            "creating config directory at {}",
+            paths.config_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&config.buffer_dir).with_context(|| {
+        format!(
+            "creating buffer directory at {}",
+            config.buffer_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&config.output_dir).with_context(|| {
+        format!(
+            "creating output directory at {}",
+            config.output_dir.display()
+        )
+    })?;
+    Ok(())
 }
 
 pub fn example_config() -> Result<String> {
@@ -215,6 +359,27 @@ impl FileConfig {
         }
         if self.max_replay_seconds < 10 {
             bail!("max_replay_seconds must be at least 10");
+        }
+        if self.audio_sample_rate == 0 {
+            bail!("audio_sample_rate must be at least 1");
+        }
+        if self.audio_channels == 0 {
+            bail!("audio_channels must be at least 1");
+        }
+        if self.audio_bitrate.trim().is_empty() {
+            bail!("audio_bitrate must not be empty");
+        }
+
+        let system_audio_backend =
+            AudioBackend::parse(&self.system_audio_backend, "system_audio_backend")?;
+        let microphone_backend =
+            AudioBackend::parse(&self.microphone_backend, "microphone_backend")?;
+
+        if self.system_audio_enabled && self.system_audio_device.trim().is_empty() {
+            bail!("system_audio_device must not be empty when system_audio_enabled is true");
+        }
+        if self.microphone_enabled && self.microphone_device.trim().is_empty() {
+            bail!("microphone_device must not be empty when microphone_enabled is true");
         }
 
         let mut seen_durations = HashSet::new();
@@ -255,7 +420,7 @@ impl FileConfig {
         Ok(AppConfig {
             ffmpeg_path: self
                 .ffmpeg_path
-                .unwrap_or_else(|| PathBuf::from("ffmpeg.exe")),
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_FFMPEG_PATH)),
             buffer_dir: self.buffer_dir.unwrap_or_else(|| paths.buffer_dir.clone()),
             output_dir: self.output_dir.unwrap_or_else(|| paths.output_dir.clone()),
             max_replay_seconds: self.max_replay_seconds,
@@ -264,6 +429,15 @@ impl FileConfig {
             encoder: self.encoder,
             preset: self.preset,
             ffmpeg_input: self.ffmpeg_input,
+            system_audio_enabled: self.system_audio_enabled,
+            system_audio_backend,
+            system_audio_device: self.system_audio_device,
+            microphone_enabled: self.microphone_enabled,
+            microphone_backend,
+            microphone_device: self.microphone_device,
+            audio_sample_rate: self.audio_sample_rate,
+            audio_channels: self.audio_channels,
+            audio_bitrate: self.audio_bitrate,
             ffmpeg_extra_args: self.ffmpeg_extra_args,
             hotkeys,
         })
@@ -335,7 +509,10 @@ fn parse_key(token: &str) -> Result<KeyCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppPaths, FileConfig, HotKeySpec, KeyCode, Modifiers};
+    use super::{
+        AppConfig, AppPaths, AudioBackend, FileConfig, HotKeySpec, KeyCode, Modifiers,
+        default_hotkey_combination,
+    };
     use std::path::PathBuf;
 
     fn fake_paths() -> AppPaths {
@@ -380,5 +557,81 @@ mod tests {
         let app = config.into_app_config(&fake_paths()).unwrap();
         assert_eq!(app.buffer_dir, PathBuf::from("buffer"));
         assert_eq!(app.output_dir, PathBuf::from("output"));
+        assert!(!app.system_audio_enabled);
+        assert!(!app.microphone_enabled);
+        assert_eq!(app.system_audio_backend, AudioBackend::Wasapi);
+        assert_eq!(app.microphone_backend, AudioBackend::Dshow);
+    }
+
+    #[test]
+    fn rejects_invalid_audio_backend() {
+        let mut config = FileConfig::default();
+        config.system_audio_backend = "magic".to_string();
+        let error = config
+            .into_app_config(&fake_paths())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("system_audio_backend"));
+    }
+
+    #[test]
+    fn rejects_enabled_microphone_without_device_name() {
+        let mut config = FileConfig::default();
+        config.microphone_enabled = true;
+        let error = config
+            .into_app_config(&fake_paths())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("microphone_device"));
+    }
+
+    #[test]
+    fn serializes_and_deserializes_default_file_config() {
+        let config = FileConfig::default();
+        let rendered = toml::to_string_pretty(&config).unwrap();
+        let reparsed: FileConfig = toml::from_str(&rendered).unwrap();
+        assert_eq!(reparsed, config);
+    }
+
+    #[test]
+    fn converts_runtime_config_back_to_sparse_file_config() {
+        let app = AppConfig {
+            ffmpeg_path: PathBuf::from("ffmpeg.exe"),
+            buffer_dir: PathBuf::from("buffer"),
+            output_dir: PathBuf::from("output"),
+            max_replay_seconds: 300,
+            segment_seconds: 1,
+            frame_rate: 30,
+            encoder: "libx264".to_string(),
+            preset: "veryfast".to_string(),
+            ffmpeg_input: "desktop".to_string(),
+            system_audio_enabled: false,
+            system_audio_backend: AudioBackend::Wasapi,
+            system_audio_device: "default".to_string(),
+            microphone_enabled: false,
+            microphone_backend: AudioBackend::Dshow,
+            microphone_device: String::new(),
+            audio_sample_rate: 48_000,
+            audio_channels: 2,
+            audio_bitrate: "192k".to_string(),
+            ffmpeg_extra_args: Vec::new(),
+            hotkeys: FileConfig::default()
+                .into_app_config(&fake_paths())
+                .unwrap()
+                .hotkeys,
+        };
+
+        let file = app.to_file_config(&fake_paths());
+        assert_eq!(file.ffmpeg_path, None);
+        assert_eq!(file.buffer_dir, None);
+        assert_eq!(file.output_dir, None);
+        assert_eq!(file.system_audio_backend, "wasapi");
+        assert_eq!(file.microphone_backend, "dshow");
+    }
+
+    #[test]
+    fn provides_default_hotkeys_for_managed_durations() {
+        assert_eq!(default_hotkey_combination(120), Some("Ctrl+Alt+Shift+4"));
+        assert_eq!(default_hotkey_combination(999), None);
     }
 }

@@ -3,12 +3,16 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::mem::size_of;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
-use win_instant_replay::config::{AppConfig, HotKeySpec, KeyCode, Modifiers, load_or_create};
+use win_instant_replay::config::{
+    AppConfig, AppPaths, FileConfig, HotKeySpec, HotkeyEntry, KeyCode, Modifiers,
+    default_hotkey_combination, ensure_runtime_dirs, load_or_create_file_config,
+    load_or_create_with_paths, save_file_config,
+};
 use win_instant_replay::ffmpeg::{CaptureSupervisor, save_replay};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -21,33 +25,67 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, GetMessageW, IDC_ARROW, IDI_APPLICATION, LoadCursorW,
-    LoadIconW, MENU_ITEM_FLAGS, MSG, PostQuitMessage, RegisterClassW, SW_HIDE, SetForegroundWindow,
-    ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TRACK_POPUP_MENU_FLAGS, TrackPopupMenu,
-    TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY,
-    WM_LBUTTONDBLCLK, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    DispatchMessageW, GetCursorPos, GetMessageW, GetWindowTextLengthW, GetWindowTextW, IDC_ARROW,
+    IDI_APPLICATION, IsWindow, LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
+    MENU_ITEM_FLAGS, MSG, MessageBoxW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW,
+    SetForegroundWindow, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TRACK_POPUP_MENU_FLAGS,
+    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WNDCLASSW,
+    WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::PCWSTR;
 
 const WINDOW_CLASS: &str = "WinInstantReplayHiddenWindow";
+const SETTINGS_WINDOW_CLASS: &str = "WinInstantReplaySettingsWindow";
 const TRAY_UID: u32 = 1;
 const WM_TRAYICON: u32 = WM_APP + 1;
+const MENU_SETTINGS: usize = 1000;
 const MENU_OPEN_OUTPUT: usize = 1001;
 const MENU_QUIT: usize = 1002;
 
 static APP_STATE: OnceLock<Arc<AppState>> = OnceLock::new();
 
 struct AppState {
-    config: Arc<AppConfig>,
-    capture: Mutex<Option<CaptureSupervisor>>,
+    paths: AppPaths,
+    main_window: Mutex<Option<isize>>,
+    settings_window: Mutex<Option<SettingsWindowState>>,
+    runtime: Mutex<RuntimeState>,
+}
+
+struct RuntimeState {
+    config: AppConfig,
+    capture: Option<CaptureSupervisor>,
+}
+
+#[derive(Clone, Copy)]
+struct HotkeyFieldHandle {
+    duration_seconds: u32,
+    handle: isize,
+}
+
+#[derive(Clone)]
+struct SettingsWindowState {
+    window: isize,
+    output_dir: isize,
+    ffmpeg_path: isize,
+    max_replay_seconds: isize,
+    segment_seconds: isize,
+    hotkeys: [HotkeyFieldHandle; 5],
+    save_button: isize,
+    cancel_button: isize,
 }
 
 pub fn run() -> Result<()> {
-    let config = Arc::new(load_or_create()?);
-    let capture = CaptureSupervisor::start(config.clone());
+    let (paths, config) = load_or_create_with_paths()?;
+    let capture = CaptureSupervisor::start(Arc::new(config.clone()));
     let state = Arc::new(AppState {
-        config,
-        capture: Mutex::new(Some(capture)),
+        paths,
+        main_window: Mutex::new(None),
+        settings_window: Mutex::new(None),
+        runtime: Mutex::new(RuntimeState {
+            config,
+            capture: Some(capture),
+        }),
     });
 
     APP_STATE
@@ -56,23 +94,15 @@ pub fn run() -> Result<()> {
 
     unsafe {
         let hinstance = GetModuleHandleW(None)?;
+        register_window_class(hinstance.into(), WINDOW_CLASS, Some(window_proc))?;
+        register_window_class(
+            hinstance.into(),
+            SETTINGS_WINDOW_CLASS,
+            Some(settings_window_proc),
+        )?;
+
         let class_name = wide_null(WINDOW_CLASS);
         let window_title = wide_null("Win Instant Replay");
-
-        let window_class = WNDCLASSW {
-            hCursor: LoadCursorW(None, IDC_ARROW).context("loading cursor")?,
-            hIcon: LoadIconW(None, IDI_APPLICATION).context("loading tray icon")?,
-            hInstance: hinstance.into(),
-            lpszClassName: PCWSTR(class_name.as_ptr()),
-            lpfnWndProc: Some(window_proc),
-            ..Default::default()
-        };
-
-        let atom = RegisterClassW(&window_class);
-        if atom == 0 {
-            bail!("RegisterClassW failed");
-        }
-
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(class_name.as_ptr()),
@@ -88,9 +118,13 @@ pub fn run() -> Result<()> {
             None,
         )?;
 
+        if let Some(state) = APP_STATE.get() {
+            *state.main_window.lock().unwrap() = Some(hwnd.0 as isize);
+        }
+
         let _ = ShowWindow(hwnd, SW_HIDE);
         add_tray_icon(hwnd)?;
-        register_hotkeys(hwnd, APP_STATE.get().unwrap().config.as_ref())?;
+        register_current_hotkeys(hwnd)?;
         show_notification(
             hwnd,
             "Win Instant Replay",
@@ -116,43 +150,35 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_HOTKEY => {
-            if let Some(state) = APP_STATE.get() {
-                let hotkey_id = wparam.0 as i32;
-                if let Some(binding) = state
-                    .config
-                    .hotkeys
-                    .iter()
-                    .find(|binding| binding.id == hotkey_id)
-                {
-                    let config = state.config.clone();
-                    let duration = binding.duration_seconds;
-                    // HWND is not Send, so the worker thread carries the raw handle value and
-                    // reconstructs it only to trigger a tray balloon on completion.
-                    let notify_hwnd = hwnd.0 as isize;
-                    thread::spawn(move || match save_replay(config.as_ref(), duration) {
-                        Ok(path) => {
-                            let body = format!("Saved {}s replay to {}", duration, path.display());
-                            let hwnd = HWND(notify_hwnd as *mut _);
-                            unsafe { show_notification(hwnd, "Replay saved", &body, false) };
-                        }
-                        Err(error) => {
-                            let body = format!("Could not save {}s replay: {error}", duration);
-                            let hwnd = HWND(notify_hwnd as *mut _);
-                            unsafe { show_notification(hwnd, "Replay failed", &body, true) };
-                        }
-                    });
-                }
+            if let Some((config, duration)) = hotkey_request(wparam.0 as i32) {
+                let notify_hwnd = hwnd.0 as isize;
+                thread::spawn(move || match save_replay(&config, duration) {
+                    Ok(path) => {
+                        let body = format!("Saved {}s replay to {}", duration, path.display());
+                        let hwnd = hwnd_from_isize(notify_hwnd);
+                        unsafe { show_notification(hwnd, "Replay saved", &body, false) };
+                    }
+                    Err(error) => {
+                        let body = format!("Could not save {}s replay: {error}", duration);
+                        let hwnd = hwnd_from_isize(notify_hwnd);
+                        unsafe { show_notification(hwnd, "Replay failed", &body, true) };
+                    }
+                });
             }
             LRESULT(0)
         }
         WM_COMMAND => {
             match loword(wparam.0) as usize {
+                MENU_SETTINGS => {
+                    if let Err(error) = open_settings_window() {
+                        let body = format!("Failed to open settings: {error}");
+                        show_notification(hwnd, "Settings failed", &body, true);
+                    }
+                }
                 MENU_OPEN_OUTPUT => {
-                    if let Some(state) = APP_STATE.get() {
-                        if let Err(error) = open_output_folder(&state.config.output_dir) {
-                            let body = format!("Failed to open output folder: {error}");
-                            show_notification(hwnd, "Open folder failed", &body, true);
-                        }
+                    if let Err(error) = open_output_folder(&current_output_dir()) {
+                        let body = format!("Failed to open output folder: {error}");
+                        show_notification(hwnd, "Open folder failed", &body, true);
                     }
                 }
                 MENU_QUIT => {
@@ -168,11 +194,9 @@ unsafe extern "system" fn window_proc(
                     let _ = show_tray_menu(hwnd);
                 }
                 WM_LBUTTONDBLCLK => {
-                    if let Some(state) = APP_STATE.get() {
-                        if let Err(error) = open_output_folder(&state.config.output_dir) {
-                            let body = format!("Failed to open output folder: {error}");
-                            show_notification(hwnd, "Open folder failed", &body, true);
-                        }
+                    if let Err(error) = open_settings_window() {
+                        let body = format!("Failed to open settings: {error}");
+                        show_notification(hwnd, "Settings failed", &body, true);
                     }
                 }
                 _ => {}
@@ -181,21 +205,161 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             if let Some(state) = APP_STATE.get() {
-                unregister_hotkeys(hwnd, state.config.as_ref());
-            }
-            remove_tray_icon(hwnd);
-            if let Some(state) = APP_STATE.get() {
-                if let Ok(mut capture_guard) = state.capture.lock() {
-                    if let Some(capture) = capture_guard.take() {
-                        capture.stop();
-                    }
+                let config = state.runtime.lock().unwrap().config.clone();
+                unregister_hotkeys(hwnd, &config);
+
+                let settings_hwnd = state
+                    .settings_window
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|window| window.window);
+                if let Some(settings_hwnd) = settings_hwnd {
+                    let _ = DestroyWindow(hwnd_from_isize(settings_hwnd));
                 }
+
+                remove_tray_icon(hwnd);
+                if let Some(capture) = state.runtime.lock().unwrap().capture.take() {
+                    capture.stop();
+                }
+                *state.main_window.lock().unwrap() = None;
             }
             PostQuitMessage(0);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
     }
+}
+
+unsafe extern "system" fn settings_window_proc(
+    hwnd: HWND,
+    message: u32,
+    _wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match message {
+        WM_CREATE => match create_settings_controls(hwnd) {
+            Ok(window_state) => {
+                if let Some(state) = APP_STATE.get() {
+                    *state.settings_window.lock().unwrap() = Some(window_state);
+                }
+                LRESULT(0)
+            }
+            Err(error) => {
+                show_modal_message_box(hwnd, "Settings window", &format!("{error:#}"), true);
+                LRESULT(-1)
+            }
+        },
+        WM_COMMAND => {
+            if let Some(window_state) = current_settings_window() {
+                let source_hwnd = if lparam.0 == 0 {
+                    None
+                } else {
+                    Some(hwnd_from_isize(lparam.0 as isize))
+                };
+
+                if let Some(source_hwnd) = source_hwnd {
+                    if source_hwnd == hwnd_from_isize(window_state.save_button) {
+                        match save_settings_from_window(hwnd) {
+                            Ok(()) => {
+                                let _ = DestroyWindow(hwnd);
+                            }
+                            Err(error) => {
+                                show_modal_message_box(
+                                    hwnd,
+                                    "Could not save settings",
+                                    &format!("{error:#}"),
+                                    true,
+                                );
+                            }
+                        }
+                        return LRESULT(0);
+                    }
+                    if source_hwnd == hwnd_from_isize(window_state.cancel_button) {
+                        let _ = DestroyWindow(hwnd);
+                        return LRESULT(0);
+                    }
+                }
+            }
+            DefWindowProcW(hwnd, message, _wparam, lparam)
+        }
+        WM_CLOSE => {
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            if let Some(state) = APP_STATE.get() {
+                *state.settings_window.lock().unwrap() = None;
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, message, _wparam, lparam),
+    }
+}
+
+unsafe fn register_window_class(
+    hinstance: windows::Win32::Foundation::HINSTANCE,
+    class_name: &str,
+    proc: windows::Win32::UI::WindowsAndMessaging::WNDPROC,
+) -> Result<()> {
+    let class_name = wide_null(class_name);
+    let window_class = WNDCLASSW {
+        hCursor: LoadCursorW(None, IDC_ARROW).context("loading cursor")?,
+        hIcon: LoadIconW(None, IDI_APPLICATION).context("loading window icon")?,
+        hInstance: hinstance,
+        lpszClassName: PCWSTR(class_name.as_ptr()),
+        lpfnWndProc: proc,
+        ..Default::default()
+    };
+
+    let atom = RegisterClassW(&window_class);
+    if atom == 0 {
+        bail!("RegisterClassW failed")
+    }
+
+    Ok(())
+}
+
+fn hotkey_request(hotkey_id: i32) -> Option<(AppConfig, u32)> {
+    let state = APP_STATE.get()?;
+    let runtime = state.runtime.lock().ok()?;
+    let binding = runtime
+        .config
+        .hotkeys
+        .iter()
+        .find(|binding| binding.id == hotkey_id)?;
+    Some((runtime.config.clone(), binding.duration_seconds))
+}
+
+fn current_output_dir() -> PathBuf {
+    APP_STATE
+        .get()
+        .and_then(|state| {
+            state
+                .runtime
+                .lock()
+                .ok()
+                .map(|runtime| runtime.config.output_dir.clone())
+        })
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn current_settings_window() -> Option<SettingsWindowState> {
+    APP_STATE.get().and_then(|state| {
+        state
+            .settings_window
+            .lock()
+            .ok()
+            .and_then(|window| window.clone())
+    })
+}
+
+unsafe fn register_current_hotkeys(hwnd: HWND) -> Result<()> {
+    let state = APP_STATE
+        .get()
+        .ok_or_else(|| anyhow!("application state not initialized"))?;
+    let config = state.runtime.lock().unwrap().config.clone();
+    register_hotkeys(hwnd, &config)
 }
 
 unsafe fn register_hotkeys(hwnd: HWND, config: &AppConfig) -> Result<()> {
@@ -262,9 +426,16 @@ unsafe fn show_notification(hwnd: HWND, title: &str, body: &str, is_error: bool)
 
 unsafe fn show_tray_menu(hwnd: HWND) -> Result<()> {
     let menu = CreatePopupMenu().context("CreatePopupMenu failed")?;
+    let settings_text = wide_null("Settings");
     let open_text = wide_null("Open Output Folder");
     let quit_text = wide_null("Quit");
 
+    AppendMenuW(
+        menu,
+        MENU_ITEM_FLAGS(0),
+        MENU_SETTINGS,
+        PCWSTR(settings_text.as_ptr()),
+    )?;
     AppendMenuW(
         menu,
         MENU_ITEM_FLAGS(0),
@@ -294,6 +465,390 @@ unsafe fn show_tray_menu(hwnd: HWND) -> Result<()> {
     Ok(())
 }
 
+unsafe fn open_settings_window() -> Result<()> {
+    if let Some(existing) = current_settings_window() {
+        let existing_hwnd = hwnd_from_isize(existing.window);
+        if IsWindow(Some(existing_hwnd)).as_bool() {
+            let _ = ShowWindow(existing_hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(existing_hwnd);
+            return Ok(());
+        }
+    }
+
+    let hinstance = GetModuleHandleW(None)?;
+    let class_name = wide_null(SETTINGS_WINDOW_CLASS);
+    let window_title = wide_null("Win Instant Replay Settings");
+    let hwnd = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        PCWSTR(class_name.as_ptr()),
+        PCWSTR(window_title.as_ptr()),
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        120,
+        120,
+        620,
+        470,
+        None,
+        None,
+        Some(hinstance.into()),
+        None,
+    )?;
+
+    let _ = ShowWindow(hwnd, SW_SHOW);
+    let _ = SetForegroundWindow(hwnd);
+    Ok(())
+}
+
+unsafe fn create_settings_controls(hwnd: HWND) -> Result<SettingsWindowState> {
+    let current = APP_STATE
+        .get()
+        .ok_or_else(|| anyhow!("application state not initialized"))?;
+    let file_config = load_or_create_file_config(&current.paths)?;
+
+    create_label(
+        hwnd,
+        "Leave ffmpeg blank to use ffmpeg.exe on PATH. Leave output blank to use the default Videos folder.",
+        20,
+        16,
+        560,
+        20,
+    )?;
+
+    create_label(hwnd, "Output directory", 20, 52, 130, 20)?;
+    let output_dir = create_edit(
+        hwnd,
+        file_config
+            .output_dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .as_deref()
+            .unwrap_or(""),
+        180,
+        48,
+        390,
+        24,
+    )?;
+
+    create_label(hwnd, "ffmpeg path", 20, 90, 130, 20)?;
+    let ffmpeg_path = create_edit(
+        hwnd,
+        file_config
+            .ffmpeg_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .as_deref()
+            .unwrap_or(""),
+        180,
+        86,
+        390,
+        24,
+    )?;
+
+    create_label(hwnd, "Replay buffer seconds", 20, 128, 150, 20)?;
+    let max_replay_seconds = create_edit(
+        hwnd,
+        &file_config.max_replay_seconds.to_string(),
+        180,
+        124,
+        120,
+        24,
+    )?;
+
+    create_label(hwnd, "Segment length seconds", 20, 166, 150, 20)?;
+    let segment_seconds = create_edit(
+        hwnd,
+        &file_config.segment_seconds.to_string(),
+        180,
+        162,
+        120,
+        24,
+    )?;
+
+    create_label(hwnd, "Global hotkeys", 20, 210, 150, 20)?;
+
+    let hotkeys = [
+        create_hotkey_field(hwnd, &file_config, 10, 242)?,
+        create_hotkey_field(hwnd, &file_config, 30, 276)?,
+        create_hotkey_field(hwnd, &file_config, 60, 310)?,
+        create_hotkey_field(hwnd, &file_config, 120, 344)?,
+        create_hotkey_field(hwnd, &file_config, 300, 378)?,
+    ];
+
+    let save_button = create_button(hwnd, "Save", 390, 408, 80, 28)?;
+    let cancel_button = create_button(hwnd, "Cancel", 490, 408, 80, 28)?;
+
+    Ok(SettingsWindowState {
+        window: hwnd.0 as isize,
+        output_dir: output_dir.0 as isize,
+        ffmpeg_path: ffmpeg_path.0 as isize,
+        max_replay_seconds: max_replay_seconds.0 as isize,
+        segment_seconds: segment_seconds.0 as isize,
+        hotkeys,
+        save_button: save_button.0 as isize,
+        cancel_button: cancel_button.0 as isize,
+    })
+}
+
+unsafe fn create_hotkey_field(
+    hwnd: HWND,
+    file_config: &FileConfig,
+    duration_seconds: u32,
+    y: i32,
+) -> Result<HotkeyFieldHandle> {
+    create_label(
+        hwnd,
+        &format!("Save last {duration_seconds}s"),
+        40,
+        y + 4,
+        130,
+        20,
+    )?;
+
+    let combination = file_config
+        .hotkeys
+        .iter()
+        .find(|entry| entry.duration_seconds == duration_seconds)
+        .map(|entry| entry.combination.as_str())
+        .or_else(|| default_hotkey_combination(duration_seconds))
+        .unwrap_or("");
+
+    let handle = create_edit(hwnd, combination, 180, y, 210, 24)?;
+    Ok(HotkeyFieldHandle {
+        duration_seconds,
+        handle: handle.0 as isize,
+    })
+}
+
+unsafe fn create_label(
+    parent: HWND,
+    text: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<HWND> {
+    create_child_window(
+        parent,
+        "STATIC",
+        text,
+        WS_CHILD | WS_VISIBLE,
+        x,
+        y,
+        width,
+        height,
+    )
+}
+
+unsafe fn create_edit(
+    parent: HWND,
+    text: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<HWND> {
+    create_child_window(
+        parent,
+        "EDIT",
+        text,
+        WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
+        x,
+        y,
+        width,
+        height,
+    )
+}
+
+unsafe fn create_button(
+    parent: HWND,
+    text: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<HWND> {
+    create_child_window(
+        parent,
+        "BUTTON",
+        text,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        x,
+        y,
+        width,
+        height,
+    )
+}
+
+unsafe fn create_child_window(
+    parent: HWND,
+    class_name: &str,
+    text: &str,
+    style: windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<HWND> {
+    let hinstance = GetModuleHandleW(None)?;
+    let class_name = wide_null(class_name);
+    let text = wide_null(text);
+    let hwnd = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        PCWSTR(class_name.as_ptr()),
+        PCWSTR(text.as_ptr()),
+        style,
+        x,
+        y,
+        width,
+        height,
+        Some(parent),
+        None,
+        Some(hinstance.into()),
+        None,
+    )?;
+    Ok(hwnd)
+}
+
+unsafe fn save_settings_from_window(_settings_hwnd: HWND) -> Result<()> {
+    let state = APP_STATE
+        .get()
+        .ok_or_else(|| anyhow!("application state not initialized"))?;
+    let window = state
+        .settings_window
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow!("settings window state missing"))?;
+
+    let output_dir = read_control_text(hwnd_from_isize(window.output_dir))?;
+    let ffmpeg_path = read_control_text(hwnd_from_isize(window.ffmpeg_path))?;
+    let max_replay_seconds = parse_u32_field(
+        "Replay buffer seconds",
+        &read_control_text(hwnd_from_isize(window.max_replay_seconds))?,
+    )?;
+    let segment_seconds = parse_u32_field(
+        "Segment length seconds",
+        &read_control_text(hwnd_from_isize(window.segment_seconds))?,
+    )?;
+
+    let mut file_config = load_or_create_file_config(&state.paths)?;
+    file_config.output_dir = empty_to_none_path(&output_dir);
+    file_config.ffmpeg_path = empty_to_none_path(&ffmpeg_path);
+    file_config.max_replay_seconds = max_replay_seconds;
+    file_config.segment_seconds = segment_seconds;
+    file_config.hotkeys = window
+        .hotkeys
+        .iter()
+        .map(|field| {
+            let combination = read_control_text(hwnd_from_isize(field.handle))?;
+            if combination.is_empty() {
+                bail!(
+                    "Hotkey for {}s replay cannot be blank",
+                    field.duration_seconds
+                );
+            }
+            Ok(HotkeyEntry {
+                duration_seconds: field.duration_seconds,
+                combination,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    apply_file_config(file_config)?;
+    Ok(())
+}
+
+fn apply_file_config(file_config: FileConfig) -> Result<()> {
+    let state = APP_STATE
+        .get()
+        .ok_or_else(|| anyhow!("application state not initialized"))?;
+    let new_config = file_config.clone().into_app_config(&state.paths)?;
+    ensure_runtime_dirs(&new_config, &state.paths)?;
+
+    let main_hwnd = state
+        .main_window
+        .lock()
+        .unwrap()
+        .as_ref()
+        .copied()
+        .map(hwnd_from_isize)
+        .ok_or_else(|| anyhow!("main window handle missing"))?;
+
+    let mut runtime = state.runtime.lock().unwrap();
+    let old_config = runtime.config.clone();
+    let old_file_config = old_config.to_file_config(&state.paths);
+
+    save_file_config(&state.paths, &file_config)?;
+
+    unsafe { unregister_hotkeys(main_hwnd, &old_config) };
+    if let Some(capture) = runtime.capture.take() {
+        capture.stop();
+    }
+
+    if let Err(error) = unsafe { register_hotkeys(main_hwnd, &new_config) } {
+        unsafe { unregister_hotkeys(main_hwnd, &new_config) };
+        let _ = save_file_config(&state.paths, &old_file_config);
+        let _ = unsafe { register_hotkeys(main_hwnd, &old_config) };
+        runtime.capture = Some(CaptureSupervisor::start(Arc::new(old_config.clone())));
+        return Err(error);
+    }
+
+    runtime.capture = Some(CaptureSupervisor::start(Arc::new(new_config.clone())));
+    runtime.config = new_config;
+    drop(runtime);
+
+    unsafe {
+        show_notification(
+            main_hwnd,
+            "Settings saved",
+            "Capture restarted with the updated configuration.",
+            false,
+        );
+    }
+
+    Ok(())
+}
+
+fn empty_to_none_path(value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+fn parse_u32_field(name: &str, value: &str) -> Result<u32> {
+    value
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("{name} must be a whole number"))
+}
+
+unsafe fn read_control_text(hwnd: HWND) -> Result<String> {
+    let length = GetWindowTextLengthW(hwnd);
+    let mut buffer = vec![0u16; (length.max(0) as usize) + 1];
+    let copied = GetWindowTextW(hwnd, &mut buffer) as usize;
+    Ok(String::from_utf16_lossy(&buffer[..copied])
+        .trim()
+        .to_string())
+}
+
+unsafe fn show_modal_message_box(hwnd: HWND, title: &str, body: &str, is_error: bool) {
+    let title = wide_null(title);
+    let body = wide_null(body);
+    let style = if is_error {
+        MB_OK | MB_ICONERROR
+    } else {
+        MB_OK | MB_ICONINFORMATION
+    };
+    let _ = MessageBoxW(
+        Some(hwnd),
+        PCWSTR(body.as_ptr()),
+        PCWSTR(title.as_ptr()),
+        style,
+    );
+}
+
 fn open_output_folder(path: &Path) -> Result<()> {
     Command::new("explorer.exe")
         .arg(path)
@@ -315,6 +870,10 @@ fn wide_null(value: &str) -> Vec<u16> {
 
 fn loword(value: usize) -> u16 {
     (value & 0xffff) as u16
+}
+
+fn hwnd_from_isize(value: isize) -> HWND {
+    HWND(value as *mut _)
 }
 
 fn to_windows_hotkey(spec: HotKeySpec) -> (HOT_KEY_MODIFIERS, u32) {

@@ -14,6 +14,20 @@ frame_rate = 30
 encoder = "libx264"
 preset = "veryfast"
 ffmpeg_input = "desktop"
+
+# Audio is opt-in. Screen-only capture remains the default.
+system_audio_enabled = false
+system_audio_backend = "wasapi"
+system_audio_device = "default"
+
+microphone_enabled = false
+microphone_backend = "dshow"
+microphone_device = ""
+
+audio_sample_rate = 48000
+audio_channels = 2
+audio_bitrate = "192k"
+
 ffmpeg_extra_args = []
 
 [[hotkeys]]

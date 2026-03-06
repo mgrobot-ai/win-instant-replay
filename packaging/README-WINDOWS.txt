@@ -23,6 +23,12 @@ Quick test
 3. Press Ctrl+Alt+Shift+1.
 4. Look for a clip in your Videos\WinInstantReplay folder.
 
+Audio (optional)
+----------------
+- Screen-only capture is the default.
+- To include system audio and/or microphone audio, edit config.toml after first run.
+- README.md documents the supported audio backends and known Windows limitations.
+
 Typical file locations
 ----------------------
 - Config: %APPDATA%\OpenClaw\WinInstantReplay\config\config.toml

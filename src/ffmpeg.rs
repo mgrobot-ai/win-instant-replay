@@ -12,7 +12,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, AudioBackend};
 use crate::retention::files_to_delete;
 
 pub struct CaptureSupervisor {
@@ -46,6 +46,13 @@ impl Drop for CaptureSupervisor {
             let _ = handle.join();
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct AudioCaptureSource {
+    input_index: usize,
+    backend: AudioBackend,
+    device: String,
 }
 
 fn supervise_capture(config: Arc<AppConfig>, shutdown: Arc<AtomicBool>) {
@@ -110,6 +117,7 @@ fn spawn_capture_process(config: &AppConfig) -> Result<Child> {
         .frame_rate
         .saturating_mul(config.segment_seconds.max(1));
     let force_keyframes = format!("expr:gte(t,n_forced*{})", config.segment_seconds.max(1));
+    let audio_sources = enabled_audio_sources(config);
 
     let mut command = Command::new(&config.ffmpeg_path);
     command
@@ -123,8 +131,15 @@ fn spawn_capture_process(config: &AppConfig) -> Result<Child> {
         .arg("-draw_mouse")
         .arg("1")
         .arg("-i")
-        .arg(&config.ffmpeg_input)
-        .arg("-an")
+        .arg(&config.ffmpeg_input);
+
+    for source in &audio_sources {
+        append_audio_input_args(&mut command, source);
+    }
+
+    command
+        .arg("-map")
+        .arg("0:v:0")
         .arg("-c:v")
         .arg(&config.encoder)
         .arg("-preset")
@@ -141,6 +156,24 @@ fn spawn_capture_process(config: &AppConfig) -> Result<Child> {
         .arg("0")
         .arg("-force_key_frames")
         .arg(force_keyframes);
+
+    if let Some(audio_filter) = build_audio_filter(&audio_sources) {
+        command
+            .arg("-filter_complex")
+            .arg(audio_filter)
+            .arg("-map")
+            .arg("[aout]")
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-b:a")
+            .arg(&config.audio_bitrate)
+            .arg("-ar")
+            .arg(config.audio_sample_rate.to_string())
+            .arg("-ac")
+            .arg(config.audio_channels.to_string());
+    } else {
+        command.arg("-an");
+    }
 
     for arg in &config.ffmpeg_extra_args {
         command.arg(arg);
@@ -161,6 +194,67 @@ fn spawn_capture_process(config: &AppConfig) -> Result<Child> {
         .stderr(Stdio::null());
 
     command.spawn().context("spawning ffmpeg capture process")
+}
+
+fn enabled_audio_sources(config: &AppConfig) -> Vec<AudioCaptureSource> {
+    let mut sources = Vec::new();
+    let mut next_input_index = 1;
+
+    if config.system_audio_enabled {
+        sources.push(AudioCaptureSource {
+            input_index: next_input_index,
+            backend: config.system_audio_backend,
+            device: config.system_audio_device.clone(),
+        });
+        next_input_index += 1;
+    }
+
+    if config.microphone_enabled {
+        sources.push(AudioCaptureSource {
+            input_index: next_input_index,
+            backend: config.microphone_backend,
+            device: config.microphone_device.clone(),
+        });
+    }
+
+    sources
+}
+
+fn append_audio_input_args(command: &mut Command, source: &AudioCaptureSource) {
+    command.arg("-thread_queue_size").arg("512");
+
+    match source.backend {
+        AudioBackend::Wasapi => {
+            command
+                .arg("-f")
+                .arg("wasapi")
+                .arg("-i")
+                .arg(&source.device);
+        }
+        AudioBackend::Dshow => {
+            command
+                .arg("-f")
+                .arg("dshow")
+                .arg("-i")
+                .arg(format!("audio={}", source.device));
+        }
+    }
+}
+
+fn build_audio_filter(audio_sources: &[AudioCaptureSource]) -> Option<String> {
+    match audio_sources {
+        [] => None,
+        [source] => Some(format!(
+            "[{index}:a]aresample=async=1:first_pts=0[aout]",
+            index = source.input_index
+        )),
+        [first, second] => Some(format!(
+            "[{first}:a]aresample=async=1:first_pts=0[a1];[{second}:a]aresample=async=1:first_pts=0[a2];[a1][a2]amix=inputs=2:duration=longest:dropout_transition=0[aout]",
+            first = first.input_index,
+            second = second.input_index,
+        )),
+        _ => None,
+    }
 }
 
 pub fn save_replay(config: &AppConfig, duration_seconds: u32) -> Result<PathBuf> {
@@ -300,7 +394,8 @@ fn is_segment_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_segment_file;
+    use super::{AudioCaptureSource, build_audio_filter, is_segment_file};
+    use crate::config::AudioBackend;
     use std::path::Path;
 
     #[test]
@@ -308,5 +403,26 @@ mod tests {
         assert!(is_segment_file(Path::new("segment-20260306-120000.mp4")));
         assert!(!is_segment_file(Path::new("clip.mp4")));
         assert!(!is_segment_file(Path::new("segment-20260306-120000.txt")));
+    }
+
+    #[test]
+    fn builds_mix_filter_for_two_audio_inputs() {
+        let filter = build_audio_filter(&[
+            AudioCaptureSource {
+                input_index: 1,
+                backend: AudioBackend::Wasapi,
+                device: "default".to_string(),
+            },
+            AudioCaptureSource {
+                input_index: 2,
+                backend: AudioBackend::Dshow,
+                device: "Mic".to_string(),
+            },
+        ])
+        .unwrap();
+
+        assert!(filter.contains("[1:a]aresample"));
+        assert!(filter.contains("[2:a]aresample"));
+        assert!(filter.contains("amix=inputs=2"));
     }
 }
