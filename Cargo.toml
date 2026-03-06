@@ -2,8 +2,14 @@
 name = "win-instant-replay"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Windows tray app for disk-backed instant replay clips powered by ffmpeg"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/mgrobot-ai/win-instant-replay"
+homepage = "https://github.com/mgrobot-ai/win-instant-replay"
+keywords = ["windows", "screen-recording", "ffmpeg", "tray", "replay"]
+categories = ["multimedia::video", "os::windows-apis"]
 
 [lib]
 name = "win_instant_replay"

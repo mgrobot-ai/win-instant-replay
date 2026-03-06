@@ -1,7 +1,8 @@
 # Example configuration for Win Instant Replay.
 #
 # If ffmpeg.exe is already on PATH, you can leave ffmpeg_path unset.
-# The app will auto-create a similar config on first launch.
+# The app auto-creates a similar config on first launch in your Windows app config directory.
+# Typical location: %APPDATA%/OpenClaw/WinInstantReplay/config/config.toml
 
 # ffmpeg_path = "C:/Tools/ffmpeg/bin/ffmpeg.exe"
 # buffer_dir = "C:/Users/you/AppData/Local/WinInstantReplay/buffer"
